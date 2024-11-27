@@ -1,93 +1,123 @@
 import numpy as np
-from qutip import *
-from scipy.optimize import minimize
-
-# Define system parameters
-omega0 = 1.0  # Qubit frequency
-T = 10.0      # Total evolution time
-N = 1000      # Number of time steps
-tlist = np.linspace(0, T, N)  # Time array
-
-# Define initial and target states
-psi0 = basis(2, 0)       # Initial state |0>
-psi_target = basis(2, 1) # Target state |1>
-
-# Define Pauli matrices
-sigma_x = sigmax()
-sigma_z = sigmaz()
-
-# Define the static Hamiltonian
-H0 = 0.5 * omega0 * sigma_z
-
-# Number of basis functions
-M = 5
-
-# Generate random frequencies
-np.random.seed(42)
-omega_k = np.random.uniform(0.5, 2.0, M)
-
-# Define the control field as a sum over basis functions
-def control_field(t, coeffs):
-    field = 0
-    for k in range(M):
-        field += coeffs[2*k] * np.sin(omega_k[k] * t) + coeffs[2*k+1] * np.cos(omega_k[k] * t)
-    return field
-
-# Objective function to minimize (1 - fidelity)
-def objective(coeffs):
-    # Time-dependent control Hamiltonian
-    Ht = [H0, [sigma_x, lambda t, args: control_field(t, coeffs)]]
-    
-    # Solve the Schrödinger equation
-    result = sesolve(Ht, psi0, tlist)
-    psi_final = result.states[-1]
-    
-    # Compute the fidelity
-    fidelity = abs(psi_target.overlap(psi_final))**2
-    
-    # Return (1 - fidelity) for minimization
-    return 1 - fidelity
-
-# Initial guess for coefficients
-coeffs0 = np.random.randn(2 * M)
-
-# Perform the optimization
-result = minimize(objective, coeffs0, method='Nelder-Mead', options={'maxiter': 500})
-
-# Extract optimized coefficients
-coeffs_opt = result.x
-
-# Generate the optimized control field
-control_opt = [control_field(t, coeffs_opt) for t in tlist]
-
-# Plot the optimized control field
 import matplotlib.pyplot as plt
+from qutip import *
 
-plt.figure()
-plt.plot(tlist, control_opt)
+# System parameters
+T = 10.0           # Total evolution time
+n_ts = 100         # Number of time slices (N)
+delta_t = T / n_ts # Time step size
+
+# Driving strength
+Omega = 1.0        # Adjust as needed
+
+# Error parameters
+A = 0.1            # Error average (adjust as needed)
+B = 0.05           # Error difference average (adjust as needed)
+
+# Single-qubit Pauli operators
+sx = sigmax()
+sy = sigmay()
+sz = sigmaz()
+si = qeye(2)
+
+# Two-qubit Pauli operators
+sx1 = tensor(sx, si)
+sy1 = tensor(sy, si)
+sz1 = tensor(sz, si)
+sx2 = tensor(si, sx)
+sy2 = tensor(si, sy)
+sz2 = tensor(si, sz)
+
+# Define Sx and Sy based on error parameters
+Sx = np.sin(A) * sx1 + np.sin(B) * sx2
+Sy = np.cos(A) * sy1 + np.cos(B) * sy2
+
+#How should I define them?
+X = 1
+Y = 1
+
+# Control functions f1(t) and f2(t) as lists of amplitudes
+# For simplicity, we'll use constant amplitudes; adjust as needed
+f1 = np.ones(n_ts)  # Real part of the driving
+f2 = np.zeros(n_ts) # Imaginary part of the driving
+
+# Control Hamiltonian H(t) will be constructed using Sx and Sy
+# Function to compute the unitary evolution U(T) using piecewise constant Hamiltonians
+def unitary_pw(N):
+    delta_t = T / N  # Time step size
+    U = qeye(4)      # Identity operator for two qubits (dimension 4)
+    for k in range(N):
+        H_t = Omega * (f1[k]*X+f2[k]*Y)*(Sx + Sy)**2
+        U_step = (-1j * H_t * delta_t).expm()
+        U = U_step * U  # Multiply in time order
+    return U
+
+# Define the target Hamiltonian H_XX for the MS gate
+H_XX = sx1 * sx2
+
+# Target unitary (MS gate)
+theta = np.pi / 2           # Interaction angle
+U_MS = (-1j * theta * H_XX).expm()
+
+# Initial state
+initial_state = tensor(basis(2, 0), basis(2, 0))  # |00⟩
+
+# Compute the unitary evolution
+U = unitary_pw(n_ts)
+
+# Apply the unitary to the initial state
+final_state = U * initial_state
+
+# Compute the fidelity between the implemented unitary and the target unitary
+fid = fidelity(U, U_MS)
+print("Fidelity between U and U_MS:", fid)
+
+
+"""
+# CRAB method parameters
+method_params = {
+    'n_basis_func': 5,        # Number of basis functions
+    'num_optim_iter': 100,    # Number of optimization iterations
+}
+
+# Run the optimization
+result = pulseoptim.opt_pulse_crab(
+    H_drift,               # Drift Hamiltonian
+    H_controls,            # Control Hamiltonians
+    initial_state,         # Initial state
+    U_MS,                  # Target unitary (MS gate)
+    n_ts,                  # Number of time slices
+    T,                     # Total evolution time
+    amp_lbound=-5.0,       # Lower bound on control amplitudes
+    amp_ubound=5.0,        # Upper bound on control amplitudes
+    fid_err_targ=1e-4,     # Target fidelity error
+    max_iter=500,          # Maximum number of iterations
+    method_params=method_params,
+    gen_stats=True         # Generate statistics
+)
+
+# Extract optimized pulses
+optimized_pulses = result.final_amps  # Shape: (n_ts, n_controls)
+
+# Time grid
+t_list = np.linspace(0, T, n_ts)
+
+# Plot the optimized control pulses
+plt.figure(figsize=(12, 6))
+control_labels = ['Global X', 'Global Y', 'Spin-Spin Interaction']
+for i in range(len(H_controls)):
+    plt.plot(t_list, optimized_pulses[:, i], label=control_labels[i])
 plt.xlabel('Time')
-plt.ylabel('Control Field Amplitude')
-plt.title('Optimized Control Field using CRAB')
-plt.show()
-
-# Simulate the system with the optimized control field
-Ht_opt = [H0, [sigma_x, lambda t, args: control_field(t, coeffs_opt)]]
-result_opt = sesolve(Ht_opt, psi0, tlist)
-
-# Compute the final fidelity
-psi_final_opt = result_opt.states[-1]
-fidelity_opt = abs(psi_target.overlap(psi_final_opt))**2
-print(f"Final Fidelity: {fidelity_opt:.6f}")
-
-# Plot the population dynamics
-pop0 = [abs(state.overlap(basis(2, 0)))**2 for state in result_opt.states]
-pop1 = [abs(state.overlap(basis(2, 1)))**2 for state in result_opt.states]
-
-plt.figure()
-plt.plot(tlist, pop0, label='|0⟩ Population')
-plt.plot(tlist, pop1, label='|1⟩ Population')
-plt.xlabel('Time')
-plt.ylabel('Population')
+plt.ylabel('Control amplitude')
+plt.title('Optimized Control Pulses for MS Gate')
 plt.legend()
-plt.title('Population Dynamics with Optimized Control')
 plt.show()
+
+# Final fidelity error
+final_fid_err = result.fid_err
+print(f'Final Fidelity Error: {final_fid_err}')
+
+# Calculate the fidelity
+final_fidelity = 1 - final_fid_err
+print(f'Final Fidelity: {final_fidelity}')
+"""
